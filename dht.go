@@ -1,3 +1,24 @@
+//--------------------------------------------------------------------------------------------------
+//
+// Copyright (c) 2015 Denis Dyakov
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+// associated documentation files (the "Software"), to deal in the Software without restriction,
+// including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or substantial
+// portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+//--------------------------------------------------------------------------------------------------
+
 package dht
 
 // #include "dht.go.h"
@@ -258,8 +279,40 @@ func ReadDHTxx(sensorType SensorType, pin int,
 // 4) error if present.
 func ReadDHTxxWithRetry(sensorType SensorType, pin int, boostPerfFlag bool,
 	retry int) (temperature float32, humidity float32, retried int, err error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	shell.CloseContextOnKillSignal(cancel)
+	// Create default context
+	ctx := context.Background()
+	// Reroute call
+	return ReadDHTxxWithContextAndRetry(ctx, sensorType, pin,
+		boostPerfFlag, retry)
+}
+
+// Send activation request to DHTxx sensor via specific pin.
+// Then decode pulses sent back with asynchronous
+// protocol specific for DHTxx sensors. Retry n times in case of failure.
+//
+// Input parameters:
+// 1) parent context; could be used to manage life-cycle
+//  of sensor request session from code outside;
+// 2) sensor type: DHT11, DHT22 (aka AM2302);
+// 3) pin number from gadget GPIO to interract with sensor;
+// 4) boost GPIO performance flag should be used for old devices
+//  such as Raspberry PI 1 (this will require root privileges);
+// 5) how many times to retry until success either сounter is zeroed.
+//
+// Return:
+// 1) temperature in Celsius;
+// 2) humidity in percent;
+// 3) number of extra retries data from sensor;
+// 4) error if present.
+func ReadDHTxxWithContextAndRetry(parent context.Context, sensorType SensorType, pin int,
+	boostPerfFlag bool, retry int) (temperature float32, humidity float32, retried int, err error) {
+	// Use done channel as a trigger to exit from signal waiting goroutine.
+	done := make(chan struct{})
+	defer close(done)
+	// Create context with cancelation possibility.
+	ctx, cancel := context.WithCancel(parent)
+	// Run goroutine waiting for OS termantion events, including keyboard Ctrl+C.
+	shell.CloseContextOnKillSignal(cancel, done)
 	retried = 0
 	for {
 		temp, hum, err := ReadDHTxx(sensorType, pin, boostPerfFlag)
@@ -269,12 +322,12 @@ func ReadDHTxxWithRetry(sensorType SensorType, pin int, boostPerfFlag bool,
 				retry--
 				retried++
 				select {
+				// Check for termination request.
 				case <-ctx.Done():
-					// Interrupt loop, if pending termination
-					return -1, -1, retried, errors.New("Termination pending...")
-				default:
-					// Sleep before new attempt
-					time.Sleep(1500 * time.Millisecond)
+					// Interrupt loop, if pending termination.
+					return -1, -1, retried, ctx.Err()
+				// Sleep before new attempt 1.5 sec.
+				case <-time.After(1500 * time.Millisecond):
 					continue
 				}
 			}
